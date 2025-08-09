@@ -1,0 +1,9 @@
+{
+  "name": "saas-hub",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "build": "echo Building saas-hub && node -e \"console.log('build ok for saas-hub')\"",
+    "deploy": "pwsh ./deploy.ps1"
+  }
+}
