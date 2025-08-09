@@ -1,0 +1,26 @@
+name: After Sync → Broadcast Deploy
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Template Sync"]
+    types: [completed]
+
+jobs:
+  broadcast:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch post-sync to all SaaS
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}  # fine-grained PAT with repo write
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in $(seq -w 01 20); do
+            REPO="SaaS-$i"
+            echo "→ Dispatching to $OWNER/$REPO"
+            gh api repos/$OWNER/$REPO/dispatches \
+              -X POST \
+              -f event_type='post-sync' \
+              -F client_payload='{\"source\":\"hub\",\"reason\":\"template-sync\"}' || true
+          done
