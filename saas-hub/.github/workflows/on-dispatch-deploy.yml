@@ -1,0 +1,60 @@
+name: Dispatch → Build & Deploy (Vercel)
+
+on:
+  repository_dispatch:
+    types: [hub-deploy]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check prerequisites
+        run: |
+          if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "::error::Missing VERCEL_TOKEN in this repository’s secrets."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      # If package.json exists, build; otherwise skip build
+      - name: Install deps (if package.json exists)
+        run: |
+          if [ -f package.json ]; then
+            npm ci || npm install
+          else
+            echo "No package.json — skipping npm install"
+          fi
+
+      - name: Vercel Deploy (prod, non‑interactive)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -e
+          # Link project if not linked (no prompts)
+          if [ ! -f ".vercel/project.json" ]; then
+            vercel link --yes --token "$VERCEL_TOKEN" || true
+          fi
+
+          # Build if build script exists, then deploy
+          if [ -f package.json ]; then
+            if jq -e '.scripts.build' package.json >/dev/null; then
+              npm run build || echo "No build script or build failed, continuing…"
+            fi
+          fi
+
+          # Non‑interactive prod deploy
+          vercel deploy --prod --yes --token "$VERCEL_TOKEN"
