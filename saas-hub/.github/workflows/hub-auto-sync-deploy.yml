@@ -1,0 +1,123 @@
+name: Hub → Sync & Broadcast Deploy
+
+on:
+  # Manual run from Actions tab
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Show what would happen but do not write/dispatch"
+        required: false
+        default: "false"
+  # Auto whenever you change the receiver or repos.json
+  push:
+    paths:
+      - ".github/workflows/hub-auto-sync-deploy.yml"
+      - ".github/workflows/on-dispatch-deploy.yml"
+      - "repos.json"
+
+permissions:
+  contents: write   # write receiver workflow into child repos
+  actions: write    # (future) if you want workflow_dispatch per repo
+
+env:
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+jobs:
+  sync-and-broadcast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hub
+        uses: actions/checkout@v4
+
+      - name: Verify GH_PAT secret is present
+        run: |
+          if [ -z "${{ secrets.GH_PAT }}" ]; then
+            echo "::error::Missing GH_PAT secret in hub repo."
+            exit 1
+          fi
+
+      - name: Verify repos.json exists
+        run: |
+          test -f repos.json || (echo "::error::repos.json not found at repo root" && exit 1)
+          cat repos.json
+
+      - name: Install jq (JSON parsing)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install GitHub CLI
+        run: sudo apt-get install -y gh
+
+      - name: Auth GH CLI
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: gh auth status || gh auth login --with-token <<< "${GH_TOKEN}"
+
+      - name: Prepare base64 of receiver workflow
+        id: wf
+        run: |
+          path=".github/workflows/on-dispatch-deploy.yml"
+          if [ ! -f "$path" ]; then
+            echo "::error::$path is missing in hub repo. Add it and re-run."
+            exit 1
+          fi
+          CONTENT_B64=$(base64 -w0 "$path")
+          echo "content_b64=$CONTENT_B64" >> "$GITHUB_OUTPUT"
+
+      - name: Loop: upsert receiver + dispatch deploy
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          CONTENT_B64: ${{ steps.wf.outputs.content_b64 }}
+          DRY_RUN: ${{ env.DRY_RUN }}
+        run: |
+          set -e
+          echo "DRY_RUN=${DRY_RUN}"
+
+          # repos.json must be: [{ "owner":"Jvryan92", "repo":"SaaS-01" }, ...]
+          jq -r '.[] | "\(.owner)/\(.repo)"' repos.json > repos.txt
+
+          while read -r FULL; do
+            [ -z "$FULL" ] && continue
+            OWNER=$(echo "$FULL" | cut -d/ -f1)
+            REPO=$(echo "$FULL" | cut -d/ -f2)
+            WF_PATH=".github/workflows/on-dispatch-deploy.yml"
+
+            echo "==============================="
+            echo "Target: $FULL"
+            echo "Ensuring receiver workflow exists at $WF_PATH"
+
+            # Get existing file sha (if present)
+            SHA=$(gh api -H "Accept: application/vnd.github+json" \
+              "repos/$FULL/contents/$WF_PATH" --jq .sha 2>/dev/null || echo "")
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[DRY RUN] Would PUT receiver workflow into $FULL (sha=${SHA:-new})"
+            else
+              # Create or update file
+              if [ -z "$SHA" ]; then
+                gh api -X PUT "repos/$FULL/contents/$WF_PATH" \
+                  -F message="chore: ensure dispatch receiver workflow" \
+                  -F content="$CONTENT_B64" \
+                  -F branch="main"
+              else
+                gh api -X PUT "repos/$FULL/contents/$WF_PATH" \
+                  -F message="chore: update dispatch receiver workflow" \
+                  -F content="$CONTENT_B64" \
+                  -F sha="$SHA" \
+                  -F branch="main"
+              fi
+              echo "✓ Receiver workflow ensured in $FULL"
+            fi
+
+            echo "Trigger repository_dispatch → hub-deploy"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[DRY RUN] Would POST repos/$FULL/dispatches"
+            else
+              gh api -X POST "repos/$FULL/dispatches" \
+                -F event_type="hub-deploy"
+              echo "✓ Dispatch sent to $FULL"
+            fi
+
+          done < repos.txt
+
+      - name: Summary
+        run: echo "Completed sync & broadcast. Check each child repo’s Actions tab."
