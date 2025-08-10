@@ -1,0 +1,99 @@
+# .github/workflows/seed-and-verify-vercel-token.yml
+name: Seed & Verify Vercel Token (SaaS-01..20)
+
+on:
+  workflow_dispatch:
+    inputs:
+      vercel_token:
+        description: "Paste VERCEL_TOKEN (leave blank to use repo secret VERCEL_TOKEN)"
+        required: false
+        default: ""
+      repo_suffixes:
+        description: "Space-separated suffixes (default: 01..20)"
+        required: false
+        default: "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20"
+
+permissions:
+  contents: read
+  actions: write
+  administration: write
+
+jobs:
+  seed-and-verify:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      INPUT_TOKEN: ${{ github.event.inputs.vercel_token }}
+      INPUT_REPOS: ${{ github.event.inputs.repo_suffixes }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Self-test GitHub token
+        run: |
+          set -e
+          gh --version
+          gh auth status
+          gh api rate_limit
+
+      - name: Resolve VERCEL_TOKEN (input or repo secret)
+        id: pick
+        shell: bash
+        run: |
+          if [ -n "${INPUT_TOKEN}" ]; then
+            echo "token=${INPUT_TOKEN}" >> "$GITHUB_OUTPUT"
+            echo "source=input" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "token=${{ secrets.VERCEL_TOKEN }}" >> "$GITHUB_OUTPUT"
+            echo "source=repo_secret" >> "$GITHUB_OUTPUT"
+          else
+            echo "No VERCEL_TOKEN provided and no repo secret present." >&2
+            exit 1
+          fi
+
+      - name: Broadcast VERCEL_TOKEN to child repos
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suf in ${INPUT_REPOS}; do
+            REPO="Jvryan92/SaaS-$suf"
+            echo ">>> Setting VERCEL_TOKEN in $REPO"
+            gh secret set VERCEL_TOKEN -R "$REPO" -b "${{ steps.pick.outputs.token }}"
+          done
+
+      - name: Verify presence of VERCEL_TOKEN in each repo
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          OK=""
+          MISS=""
+          for suf in ${INPUT_REPOS}; do
+            REPO="Jvryan92/SaaS-$suf"
+            echo ">>> Verifying $REPO"
+            if gh secret list -R "$REPO" | grep -q "^VERCEL_TOKEN"; then
+              echo "FOUND: $REPO"
+              OK="$OK $REPO"
+            else
+              echo "MISSING: $REPO"
+              MISS="$MISS $REPO"
+            fi
+          done
+          echo "ok=$OK"   >> "$GITHUB_OUTPUT"
+          echo "miss=$MISS" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Seed & Verify Vercel Token" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Token source: **${{ steps.pick.outputs.source }}**" >> $GITHUB_STEP_SUMMARY
+          echo "- Checked repos: \`${{ github.event.inputs.repo_suffixes }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### ✅ Found in:" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ steps.verify.outputs.ok || 'None' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### ⚠️ Missing in:" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ steps.verify.outputs.miss || 'None' }}\`" >> $GITHUB_STEP_SUMMARY
