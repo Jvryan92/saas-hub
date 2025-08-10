@@ -1,0 +1,16 @@
+name: GH Token Self-Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-gh-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify GH_TOKEN works
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: gh api rate_limit
