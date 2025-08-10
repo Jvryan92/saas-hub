@@ -1,0 +1,47 @@
+name: Create SaaS Repositories
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: 'Repo name prefix'
+        required: true
+        default: 'SaaS'
+      start:
+        description: 'Start number'
+        required: true
+        default: '1'
+      end:
+        description: 'End number'
+        required: true
+        default: '20'
+      private:
+        description: 'Make repos private? true/false'
+        required: true
+        default: 'true'
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create repos (user scope)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # already added earlier
+          PREFIX: ${{ inputs.prefix }}
+          START:  ${{ inputs.start }}
+          END:    ${{ inputs.end }}
+          PRIVATE: ${{ inputs.private }}
+        run: |
+          set -e
+          for i in $(seq "$START" "$END"); do
+            name=$(printf "%s-%02d" "$PREFIX" "$i")
+            echo "Creating $name (private=$PRIVATE)"
+            # POST /user/repos (creates under your account using GH_PAT)
+            gh api -X POST user/repos \
+              -F name="$name" \
+              -F private="$PRIVATE" \
+              -F auto_init=true \
+              -F has_issues=true \
+              -F has_projects=false \
+              -F has_wiki=false || echo "Note: $name may already exist (422)."
+          done
