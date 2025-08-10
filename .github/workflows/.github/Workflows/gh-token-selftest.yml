@@ -1,16 +1,21 @@
-name: GH Token Self-Test
+name: GH Token Self Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-gh-token:
+  ping:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify GH_TOKEN works
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: gh api rate_limit
+      - name: Show gh version
+        run: gh --version
+      - name: Authenticate gh with GH_TOKEN
+        run: echo "${GH_TOKEN}" | gh auth login --with-token
+      - name: Whoami + rate limit
+        run: |
+          gh auth status
+          gh api rate_limit
