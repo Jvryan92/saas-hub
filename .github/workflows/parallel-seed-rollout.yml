@@ -1,0 +1,131 @@
+# .github/workflows/parallel-seed-rollout.yml
+name: Parallel Seed & Rollout (SaaS-01..20)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos_suffixes:
+        description: "Space-separated suffixes (default: 01..20)"
+        required: false
+        default: "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20"
+      auto_merge:
+        description: "Auto-merge PRs when checks pass"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+env:
+  GH_TOKEN: ${{ secrets.GH_TOKEN }} # classic PAT: repo, workflow
+  AUTO_MERGE: ${{ github.event.inputs.auto_merge }}
+
+jobs:
+  package:
+    name: Package Standards + CI/CD
+    runs-on: ubuntu-latest
+    outputs:
+      repo_list: ${{ steps.list.outputs.repos }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify templates exist
+        run: |
+          test -d templates/repo-standards || (echo "Missing templates/repo-standards" && exit 1)
+          test -d templates/ci-starter || (echo "Missing templates/ci-starter" && exit 1)
+      - name: List repos from input
+        id: list
+        shell: bash
+        run: |
+          set -e
+          echo "suffixes: ${{ github.event.inputs.repos_suffixes }}"
+          REPOS=""
+          for s in ${{ github.event.inputs.repos_suffixes }}; do
+            REPOS="$REPOS Jvryan92/SaaS-$s"
+          done
+          echo "repos=$REPOS" >> "$GITHUB_OUTPUT"
+      - name: Archive pack
+        run: |
+          mkdir -p /tmp/pack
+          rsync -a templates/repo-standards/ /tmp/pack/
+          rsync -a templates/ci-starter/ /tmp/pack/
+          cd /tmp && tar -czf pack.tgz pack
+      - name: Upload pack artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-pack
+          path: /tmp/pack.tgz
+
+  rollout:
+    name: Rollout to ${{ matrix.repo }}
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        repo: ${{ fromJson(format('["{0}"]', join(needs.package.outputs.repo_list, '","'))) }}
+    steps:
+      - name: Download pack
+        uses: actions/download-artifact@v4
+        with:
+          name: seed-pack
+          path: /tmp
+      - name: Unpack pack
+        run: tar -xzf /tmp/pack.tgz -C /tmp
+      - name: Clone child repo
+        run: |
+          gh repo clone "${{ matrix.repo }}" child -- -q
+          cd child
+          git checkout -B chore/seed-standards
+      - name: Copy pack into child
+        run: |
+          rsync -a /tmp/pack/ child/
+          ls -la child
+      - name: Commit & push
+        working-directory: child
+        run: |
+          git config user.name "saas-hub-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: seed repo standards + ci starter"
+            git push -f origin chore/seed-standards
+          fi
+      - name: Open or reuse PR
+        id: pr
+        working-directory: child
+        run: |
+          set -e
+          PR_URL=$(gh pr list --head chore/seed-standards --json url --jq '.[0].url // empty')
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr create --title "chore: seed repo standards + ci starter" --body "Automated seeding from saas-hub" --base main --head chore/seed-standards)
+          fi
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "PR: $PR_URL"
+      - name: Enable auto-merge (if configured)
+        if: ${{ env.AUTO_MERGE == 'true' }}
+        working-directory: child
+        run: |
+          gh pr merge --auto --squash --delete-branch "${{ steps.pr.outputs.url }}"
+      - name: Dispatch child CI (best-effort)
+        continue-on-error: true
+        run: |
+          gh workflow run --repo "${{ matrix.repo }}" ci.yml || true
+          gh workflow run --repo "${{ matrix.repo }}" vercel-deploy.yml || true
+
+  verify:
+    name: Verify Fleet Status
+    needs: [rollout]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "### Fleet rollout triggered" >> $GITHUB_STEP_SUMMARY
+          echo "- Repos: ${{ needs.package.outputs.repo_list }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Auto-merge: ${{ env.AUTO_MERGE }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Next: watch each child repo's Actions for CI + deploy results."
